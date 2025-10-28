@@ -1,0 +1,8 @@
+# Ignorar el archivo de variables de entorno
+.env
+
+# Ignorar la carpeta de node_modules (dependencias)
+node_modules/
+
+# Otras configuraciones de sistemas operativos (opcional)
+.DS_Store
