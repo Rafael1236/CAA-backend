@@ -13,15 +13,19 @@ app.use(express.json());
 
 
 (async () => {
-  const { data, error } = await supabase.from("alumnos").select("*");
+  try {
+    const { error } = await supabase.from("alumnos").select("*").limit(1);
 
-  if (error) {
-    console.error("❌ Error conectando a Supabase:", error.message);
-    process.exit(1);
-  } else {
-    console.log("✅ Conectado a Supabase exitosamente.");
+    if (error) {
+      console.error("⚠️ Supabase conectado, pero hubo un error:", error.message);
+    } else {
+      console.log("✅ Conectado a Supabase exitosamente.");
+    }
+  } catch (err) {
+    console.error("⚠️ No se pudo verificar Supabase:", err.message);
   }
 })();
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT}`));
 
