@@ -5,6 +5,7 @@ const db = require("./config/db");
 
 
 const authRoutes = require("./routes/authRoutes");
+const alumnoRoutes = require("./routes/alumnoRoutes");
 
 const app = express();
 app.use(cors());
@@ -19,3 +20,4 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT}`));
 
 app.use("/api/auth", authRoutes);
+app.use("/api/alumno", alumnoRoutes);

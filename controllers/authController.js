@@ -10,10 +10,14 @@ exports.login = async (req, res) => {
   try {
     const result = await db.query(
       `
-      SELECT u.id_usuario, u.nombre, r.nombre AS rol, u.password_hash
-      FROM usuario u
-      JOIN rol r ON r.id_rol = u.id_rol
-      WHERE u.correo = $1 AND u.activo = true
+      SELECT 
+        id_usuario,
+        nombre,
+        rol,
+        password_hash
+      FROM usuario
+      WHERE correo = $1
+        AND activo = true
       `,
       [correo]
     );
@@ -24,7 +28,6 @@ exports.login = async (req, res) => {
 
     const user = result.rows[0];
 
-    // ⚠️ Solo para MVP (sin bcrypt)
     if (user.password_hash !== password) {
       return res.status(401).json({ message: "Contraseña incorrecta" });
     }
@@ -35,7 +38,7 @@ exports.login = async (req, res) => {
       rol: user.rol,
     });
   } catch (error) {
-    console.error(error);
+    console.error("Error login:", error);
     res.status(500).json({ message: "Error en el servidor" });
   }
 };
