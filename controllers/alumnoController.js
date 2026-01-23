@@ -91,3 +91,39 @@ exports.getMiHorario = async (req, res) => {
     res.status(500).json({ message: "Error al obtener horario" });
   }
 };
+
+exports.getMiLicencia = async (req, res) => {
+  try {
+    const userHeader = req.headers["x-user"];
+    if (!userHeader) {
+      return res.status(401).json({ message: "Usuario no autenticado" });
+    }
+
+    const user = JSON.parse(userHeader);
+
+    const result = await db.query(
+      `
+      SELECT
+        l.id_licencia,
+        l.nombre,
+        l.nivel,
+        l.prioridad
+      FROM alumno a
+      JOIN licencia l ON l.id_licencia = a.id_licencia
+      WHERE a.id_usuario = $1
+      `,
+      [user.id_usuario]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: "Licencia no encontrada" });
+    }
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error("Error obtener licencia:", error);
+    res.status(500).json({ message: "Error al obtener licencia" });
+  }
+};
+
+

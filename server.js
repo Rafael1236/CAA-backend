@@ -6,6 +6,9 @@ const db = require("./config/db");
 
 const authRoutes = require("./routes/authRoutes");
 const alumnoRoutes = require("./routes/alumnoRoutes");
+const agendarRoutes = require("./routes/agendarRoutes");
+const programacionController = require("./routes/programacionRoutes");
+
 
 const app = express();
 app.use(cors());
@@ -21,3 +24,5 @@ app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT}`))
 
 app.use("/api/auth", authRoutes);
 app.use("/api/alumno", alumnoRoutes);
+app.use("/api/agendar", agendarRoutes);
+app.use("/api/programacion", programacionController);
