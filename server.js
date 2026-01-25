@@ -8,6 +8,7 @@ const authRoutes = require("./routes/authRoutes");
 const alumnoRoutes = require("./routes/alumnoRoutes");
 const agendarRoutes = require("./routes/agendarRoutes");
 const programacionController = require("./routes/programacionRoutes");
+const adminController = require("./routes/adminRoutes");
 
 
 const app = express();
@@ -26,3 +27,4 @@ app.use("/api/auth", authRoutes);
 app.use("/api/alumno", alumnoRoutes);
 app.use("/api/agendar", agendarRoutes);
 app.use("/api/programacion", programacionController);
+app.use("/api/admin", adminController);
