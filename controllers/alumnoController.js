@@ -29,7 +29,7 @@ exports.getMiHorario = async (req, res) => {
     }
 
     const user = JSON.parse(userHeader);
-    const { week } = req.query;
+    const { week = "current" } = req.query;
 
     const alumnoRes = await db.query(
       "SELECT id_alumno FROM alumno WHERE id_usuario = $1",
@@ -48,14 +48,13 @@ exports.getMiHorario = async (req, res) => {
           SELECT id_semana
           FROM semana_vuelo
           WHERE fecha_inicio > CURRENT_DATE
-          ORDER BY fecha_inicio ASC
+          ORDER BY fecha_inicio
           LIMIT 1
         `
         : `
           SELECT id_semana
           FROM semana_vuelo
-          WHERE fecha_inicio <= CURRENT_DATE
-          ORDER BY fecha_inicio DESC
+          WHERE CURRENT_DATE BETWEEN fecha_inicio AND fecha_fin
           LIMIT 1
         `;
 
@@ -70,24 +69,25 @@ exports.getMiHorario = async (req, res) => {
     const result = await db.query(
       `
       SELECT
-        v.dia_semana,
+        sv.dia_semana,
         b.hora_inicio,
         b.hora_fin,
-        a.codigo AS aeronave,
-        v.estado
-      FROM vuelo v
-      JOIN bloque_horario b ON b.id_bloque = v.id_bloque
-      JOIN aeronave a ON a.id_aeronave = v.id_aeronave
-      WHERE v.id_alumno = $1
-        AND v.id_semana = $2
-      ORDER BY b.hora_inicio, v.dia_semana
+        ae.codigo AS aeronave,
+        ss.estado
+      FROM solicitud_vuelo sv
+      JOIN solicitud_semana ss ON ss.id_solicitud = sv.id_solicitud
+      JOIN bloque_horario b ON b.id_bloque = sv.id_bloque
+      JOIN aeronave ae ON ae.id_aeronave = sv.id_aeronave
+      WHERE ss.id_alumno = $1
+        AND sv.id_semana = $2
+      ORDER BY b.hora_inicio, sv.dia_semana
       `,
       [idAlumno, idSemana]
     );
 
     res.json(result.rows);
   } catch (error) {
-    console.error("Error obtener horario:", error);
+    console.error("Error obtener horario alumno:", error);
     res.status(500).json({ message: "Error al obtener horario" });
   }
 };

@@ -128,6 +128,22 @@ exports.moverVuelo = async (req, res) => {
     }
 
     const { id_solicitud, estado, id_semana } = detRes.rows[0];
+    const semanaRes = await client.query(
+      `
+      SELECT publicada
+      FROM semana_vuelo
+      WHERE id_semana = $1
+      `,
+      [id_semana]
+    );
+
+    if (semanaRes.rows[0]?.publicada) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({
+        message: "La semana ya está publicada y no puede modificarse",
+      });
+    }
+
 
     if (estado === "PUBLICADO") {
       await client.query("ROLLBACK");
