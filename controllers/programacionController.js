@@ -53,19 +53,27 @@ exports.getCalendario = async (req, res) => {
         b.hora_fin,
 
         sv.id_aeronave,
-        ae.codigo AS aeronave_codigo,
         ae.modelo AS aeronave_modelo,
 
         ss.id_alumno,
-        u.nombre || ' ' || u.apellido AS alumno_nombre
+        u_al.nombre || ' ' || u_al.apellido AS alumno_nombre,
+
+        i.id_instructor,
+        u_ins.nombre || ' ' || u_ins.apellido AS instructor_nombre
+
       FROM solicitud_vuelo sv
       JOIN solicitud_semana ss ON ss.id_solicitud = sv.id_solicitud
       JOIN bloque_horario b ON b.id_bloque = sv.id_bloque
       JOIN aeronave ae ON ae.id_aeronave = sv.id_aeronave
+
       JOIN alumno al ON al.id_alumno = ss.id_alumno
-      JOIN usuario u ON u.id_usuario = al.id_usuario
+      JOIN usuario u_al ON u_al.id_usuario = al.id_usuario
+
+      JOIN instructor i ON i.id_instructor = al.id_instructor
+      JOIN usuario u_ins ON u_ins.id_usuario = i.id_usuario
+
       WHERE sv.id_semana = $1
-      ORDER BY b.hora_inicio, sv.dia_semana, ae.codigo
+      ORDER BY b.hora_inicio, sv.dia_semana, ae.modelo
       `,
       [idSemana]
     );
@@ -93,97 +101,6 @@ exports.getAeronavesActivas = async (req, res) => {
   } catch (e) {
     console.error("Error getAeronavesActivas:", e);
     res.status(500).json({ message: "Error obtener aeronaves" });
-  }
-};
-
-exports.moverVuelo = async (req, res) => {
-  const client = await db.connect();
-  try {
-    const user = requireProgramacion(req, res);
-    if (!user) return;
-
-    const { id_detalle } = req.params;
-    const { dia_semana, id_bloque, id_aeronave } = req.body;
-
-    if (!dia_semana || !id_bloque || !id_aeronave) {
-      return res.status(400).json({ message: "Datos incompletos" });
-    }
-
-    await client.query("BEGIN");
-
-    const detRes = await client.query(
-      `
-      SELECT sv.id_solicitud, ss.estado, sv.id_semana
-      FROM solicitud_vuelo sv
-      JOIN solicitud_semana ss ON ss.id_solicitud = sv.id_solicitud
-      WHERE sv.id_detalle = $1
-      FOR UPDATE
-      `,
-      [id_detalle]
-    );
-
-    if (detRes.rows.length === 0) {
-      await client.query("ROLLBACK");
-      return res.status(404).json({ message: "Vuelo no encontrado" });
-    }
-
-    const { id_solicitud, estado, id_semana } = detRes.rows[0];
-    const semanaRes = await client.query(
-      `
-      SELECT publicada
-      FROM semana_vuelo
-      WHERE id_semana = $1
-      `,
-      [id_semana]
-    );
-
-    if (semanaRes.rows[0]?.publicada) {
-      await client.query("ROLLBACK");
-      return res.status(403).json({
-        message: "La semana ya está publicada y no puede modificarse",
-      });
-    }
-
-
-    if (estado === "PUBLICADO") {
-      await client.query("ROLLBACK");
-      return res.status(403).json({ message: "Solicitud ya publicada" });
-    }
-
-    await client.query(
-      `
-      UPDATE solicitud_vuelo
-      SET dia_semana = $1,
-          id_bloque = $2,
-          id_aeronave = $3
-      WHERE id_detalle = $4
-      `,
-      [dia_semana, id_bloque, id_aeronave, id_detalle]
-    );
-
-    await client.query(
-      `
-      UPDATE solicitud_semana
-      SET estado = 'EN_REVISION',
-          fecha_actualizacion = now()
-      WHERE id_solicitud = $1
-      `,
-      [id_solicitud]
-    );
-
-    await client.query("COMMIT");
-    res.json({ message: "Vuelo actualizado", id_solicitud, id_semana });
-  } catch (e) {
-    await client.query("ROLLBACK");
-
-    if (e.code === "23505") {
-      return res.status(409).json({ message: "Bloque ya ocupado" });
-    }
-
-    console.error("Error moverVuelo:", e);
-    res.status(500).json({ message: "Error mover vuelo" });
-  } finally {
-    client.release();
   }
 };
 
@@ -221,15 +138,8 @@ exports.guardarCambios = async (req, res) => {
   const client = await db.connect();
 
   try {
-    const userHeader = req.headers["x-user"];
-    if (!userHeader) {
-      return res.status(401).json({ message: "No autenticado" });
-    }
-
-    const user = JSON.parse(userHeader);
-    if (user.rol !== "PROGRAMACION") {
-      return res.status(403).json({ message: "Acceso denegado" });
-    }
+    const user = requireProgramacion(req, res);
+    if (!user) return;
 
     const { movimientos } = req.body;
 
@@ -237,7 +147,58 @@ exports.guardarCambios = async (req, res) => {
       return res.status(400).json({ message: "No hay cambios para guardar" });
     }
 
+    const semanaRes = await client.query(
+      `
+      SELECT w.publicada
+      FROM solicitud_vuelo sv
+      JOIN semana_vuelo w ON w.id_semana = sv.id_semana
+      WHERE sv.id_detalle = $1
+      `,
+      [movimientos[0].id_detalle]
+    );
+
+    if (semanaRes.rows.length === 0) {
+      return res.status(404).json({ message: "Semana no encontrada" });
+    }
+
+    if (semanaRes.rows[0].publicada) {
+      return res.status(403).json({
+        message: "La semana ya fue publicada. Programación no puede modificar."
+      });
+    }
+
     await client.query("BEGIN");
+
+    for (const m of movimientos) {
+      const ocupado = await client.query(`
+        SELECT 1
+        FROM solicitud_vuelo
+        WHERE id_semana = (
+          SELECT id_semana FROM solicitud_vuelo WHERE id_detalle = $1
+        )
+          AND dia_semana = $2
+          AND id_bloque = $3
+          AND id_aeronave = $4
+          AND id_detalle <> $1
+      `, [m.id_detalle, m.dia_semana, m.id_bloque, m.id_aeronave]);
+
+      if (ocupado.rows.length > 0) {
+        throw Object.assign(
+          new Error("Conflicto de bloque"),
+          { code: "23505" }
+        );
+      }
+
+      await client.query(
+        `
+        UPDATE solicitud_vuelo
+        SET dia_semana = 0,
+            id_bloque = NULL
+        WHERE id_detalle = $1
+        `,
+        [m.id_detalle]
+      );
+    }
 
     for (const m of movimientos) {
       await client.query(
@@ -260,11 +221,11 @@ exports.guardarCambios = async (req, res) => {
 
     if (e.code === "23505") {
       return res.status(409).json({
-        message: "Conflicto: uno de los bloques ya fue ocupado"
+        message: "Conflicto: ese bloque ya está ocupado"
       });
     }
 
-    console.error("guardarCambios:", e);
+    console.error("guardarCambios PROGRAMACION:", e);
     res.status(500).json({ message: "Error al guardar cambios" });
 
   } finally {

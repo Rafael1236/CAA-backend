@@ -1,24 +1,19 @@
 const db = require("../config/db");
 
-function formatLocalDateYYYYMMDD(date) {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, "0");
-  const d = String(date.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
-}
+function requireAlumno(req, res) {
+  const raw = req.headers["x-user"];
+  if (!raw) return res.status(401).json({ message: "No autenticado" });
 
-function getMondayLocal(weekOffset = 0) {
-  const today = new Date();
-  const monday = new Date(today);
+  let user;
+  try { user = JSON.parse(raw); } catch { 
+    return res.status(400).json({ message: "Header x-user inválido" });
+  }
 
-  const diff = (today.getDay() + 6) % 7; 
-  monday.setDate(today.getDate() - diff);
-
-  monday.setDate(monday.getDate() + weekOffset * 7);
-
-  monday.setHours(12, 0, 0, 0);
-
-  return monday;
+  if (user.rol !== "ALUMNO") {
+    res.status(403).json({ message: "No autorizado" });
+    return null;
+  }
+  return user;
 }
 
 exports.getMiHorario = async (req, res) => {
@@ -55,7 +50,10 @@ exports.getMiHorario = async (req, res) => {
           SELECT id_semana
           FROM semana_vuelo
           WHERE CURRENT_DATE BETWEEN fecha_inicio AND fecha_fin
+            AND publicada = true
+          ORDER BY fecha_inicio DESC
           LIMIT 1
+
         `;
 
     const semanaRes = await db.query(semanaQuery);
@@ -69,18 +67,19 @@ exports.getMiHorario = async (req, res) => {
     const result = await db.query(
       `
       SELECT
-        sv.dia_semana,
+        v.id_vuelo,
+        v.dia_semana,
         b.hora_inicio,
         b.hora_fin,
-        ae.codigo AS aeronave,
-        ss.estado
-      FROM solicitud_vuelo sv
-      JOIN solicitud_semana ss ON ss.id_solicitud = sv.id_solicitud
-      JOIN bloque_horario b ON b.id_bloque = sv.id_bloque
-      JOIN aeronave ae ON ae.id_aeronave = sv.id_aeronave
-      WHERE ss.id_alumno = $1
-        AND sv.id_semana = $2
-      ORDER BY b.hora_inicio, sv.dia_semana
+        ae.codigo AS aeronave_codigo,
+        v.estado
+      FROM vuelo v
+      JOIN bloque_horario b ON b.id_bloque = v.id_bloque
+      JOIN aeronave ae ON ae.id_aeronave = v.id_aeronave
+      WHERE v.id_alumno = $1
+        AND v.id_semana = $2
+      ORDER BY b.hora_inicio, v.dia_semana
+
       `,
       [idAlumno, idSemana]
     );
@@ -95,7 +94,7 @@ exports.getMiHorario = async (req, res) => {
 exports.getMiLicencia = async (req, res) => {
   try {
     const userHeader = req.headers["x-user"];
-    if (!userHeader) {
+    if (!userHeader) { 
       return res.status(401).json({ message: "Usuario no autenticado" });
     }
 
@@ -127,3 +126,87 @@ exports.getMiLicencia = async (req, res) => {
 };
 
 
+exports.cancelarVuelo = async (req, res) => {
+  const client = await db.connect();
+  try {
+    const user = requireAlumno(req, res);
+    if (!user) return;
+
+    const { id_vuelo } = req.params;
+
+    await client.query("BEGIN");
+
+    const q = await client.query(
+      `
+      SELECT 
+        v.id_vuelo,
+        v.estado,
+        v.id_alumno,
+        sv.fecha_inicio,
+        v.dia_semana,
+        bh.hora_inicio,
+        (
+          (sv.fecha_inicio::timestamp)
+          + make_interval(days => (v.dia_semana - 1))
+          + (bh.hora_inicio::time)
+        ) AS fecha_hora_vuelo
+      FROM vuelo v
+      JOIN semana_vuelo sv ON sv.id_semana = v.id_semana
+      JOIN bloque_horario bh ON bh.id_bloque = v.id_bloque
+      WHERE v.id_vuelo = $1
+      FOR UPDATE
+      `,
+      [id_vuelo]
+    );
+
+    if (q.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "Vuelo no encontrado" });
+    }
+
+    const vuelo = q.rows[0];
+
+    if (user.id_alumno && vuelo.id_alumno !== user.id_alumno) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({ message: "No podés cancelar este vuelo" });
+    }
+
+    if (vuelo.estado === "CANCELADO") {
+      await client.query("ROLLBACK");
+      return res.status(409).json({ message: "El vuelo ya está cancelado" });
+    }
+
+    const timeCheck = await client.query(
+      `
+      SELECT (now() <= ($1::timestamp - interval '24 hour')) AS permitido
+      `,
+      [vuelo.fecha_hora_vuelo]
+    );
+
+    if (!timeCheck.rows[0].permitido) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({
+        message: "Solo podés cancelar con 1 hora de anticipación",
+        fecha_hora_vuelo: vuelo.fecha_hora_vuelo,
+      });
+    }
+
+    await client.query(
+      `
+      UPDATE vuelo
+      SET estado = 'CANCELADO'
+      WHERE id_vuelo = $1
+      `,
+      [id_vuelo]
+    );
+
+    await client.query("COMMIT");
+    return res.json({ message: "Vuelo cancelado" });
+  } catch (e) {
+    await client.query("ROLLBACK");
+    console.error("Error cancelarVuelo:", e);
+    return res.status(500).json({ message: "Error cancelando vuelo" });
+  } finally {
+    client.release();
+  }
+};

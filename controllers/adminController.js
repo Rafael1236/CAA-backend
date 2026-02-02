@@ -21,6 +21,20 @@ const getCurrentSemanaId = async (db) => {
   return res.rows[0]?.id_semana;
 };
 
+function requireAdmin(req, res) {
+  const userHeader = req.headers["x-user"];
+  if (!userHeader) {
+    res.status(401).json({ message: "No autenticado" });
+    return null;
+  }
+  const user = JSON.parse(userHeader);
+  if (user.rol !== "ADMIN") {
+    res.status(403).json({ message: "Acceso denegado" });
+    return null;
+  }
+  return user;
+}
+
 exports.getSemanas = async (req, res) => {
   try {
     const result = await db.query(`
@@ -53,40 +67,103 @@ exports.publicarSemana = async (req, res) => {
     await client.query("BEGIN");
 
     const semanaRes = await client.query(`
-      SELECT id_semana
-      FROM semana_vuelo
-      WHERE fecha_inicio > CURRENT_DATE
-      ORDER BY fecha_inicio
+      SELECT w.id_semana, w.fecha_inicio, w.fecha_fin
+      FROM semana_vuelo w
+      JOIN solicitud_semana ss ON ss.id_semana = w.id_semana
+      WHERE w.publicada = false
+        AND ss.estado IN ('BORRADOR', 'EN_REVISION')
+      GROUP BY w.id_semana, w.fecha_inicio, w.fecha_fin
+      ORDER BY w.fecha_inicio
       LIMIT 1
-      FOR UPDATE
     `);
 
+    await client.query(`
+      SELECT 1
+      FROM semana_vuelo
+      WHERE id_semana = $1
+      FOR UPDATE
+    `, [semanaRes.rows[0].id_semana]);
+
+
     if (semanaRes.rows.length === 0) {
-      throw new Error("No existe semana siguiente");
+      throw new Error("No existe semana para publicar");
     }
 
-    const idSemana = semanaRes.rows[0].id_semana;
+    const { id_semana, fecha_inicio, fecha_fin } = semanaRes.rows[0];
 
     await client.query(`
       UPDATE semana_vuelo
       SET publicada = true,
           fecha_publicacion = now()
       WHERE id_semana = $1
-    `, [idSemana]);
+    `, [id_semana]);
 
     await client.query(`
       UPDATE solicitud_semana
-      SET estado = 'PUBLICADO'
+      SET estado = 'PUBLICADO',
+          fecha_actualizacion = now()
       WHERE id_semana = $1
-    `, [idSemana]);
+    `, [id_semana]);
+
+    await client.query(`
+      DELETE FROM vuelo
+      WHERE id_semana = $1
+    `, [id_semana]);
+
+    await client.query(`
+      INSERT INTO vuelo (
+        id_semana,
+        id_alumno,
+        id_instructor,
+        id_aeronave,
+        dia_semana,
+        id_bloque,
+        estado,
+        creado_por
+      )
+      SELECT
+        sv.id_semana,
+        ss.id_alumno,
+        al.id_instructor,
+        sv.id_aeronave,
+        sv.dia_semana,
+        sv.id_bloque,
+        'PUBLICADO',
+        'ADMIN'
+      FROM solicitud_vuelo sv
+      JOIN solicitud_semana ss ON ss.id_solicitud = sv.id_solicitud
+      JOIN alumno al ON al.id_alumno = ss.id_alumno
+      WHERE sv.id_semana = $1
+    `, [id_semana]);
+
+    const nuevaFechaInicio = new Date(fecha_inicio);
+    nuevaFechaInicio.setDate(nuevaFechaInicio.getDate() + 7);
+
+    const nuevaFechaFin = new Date(fecha_fin);
+    nuevaFechaFin.setDate(nuevaFechaFin.getDate() + 7);
+
+    const existeRes = await client.query(`
+      SELECT 1
+      FROM semana_vuelo
+      WHERE fecha_inicio = $1
+    `, [nuevaFechaInicio]);
+
+    if (existeRes.rows.length === 0) {
+      await client.query(`
+        INSERT INTO semana_vuelo (fecha_inicio, fecha_fin, publicada)
+        VALUES ($1, $2, false)
+      `, [nuevaFechaInicio, nuevaFechaFin]);
+    }
 
     await client.query("COMMIT");
 
-    res.json({ message: "Semana publicada correctamente" });
+    res.json({
+      message: "Semana publicada y vuelos generados correctamente"
+    });
 
   } catch (e) {
     await client.query("ROLLBACK");
-    console.error(e);
+    console.error("Error publicarSemana:", e);
     res.status(400).json({ message: e.message });
   } finally {
     client.release();
@@ -150,6 +227,10 @@ exports.getAeronavesActivas = async (req, res) => {
 
 exports.getCalendario = async (req, res) => {
   try {
+    const user = requireAdmin(req, res);
+    if (!user) return;
+
+
     const { week = "next" } = req.query;
 
     let idSemana;
@@ -167,24 +248,35 @@ exports.getCalendario = async (req, res) => {
         sv.id_detalle,
         sv.id_solicitud,
         ss.estado AS estado_solicitud,
+
         sv.id_semana,
         sv.dia_semana,
         sv.id_bloque,
         b.hora_inicio,
         b.hora_fin,
+
         sv.id_aeronave,
-        ae.codigo AS aeronave_codigo,
         ae.modelo AS aeronave_modelo,
+
         ss.id_alumno,
-        u.nombre || ' ' || u.apellido AS alumno_nombre
+        u_al.nombre || ' ' || u_al.apellido AS alumno_nombre,
+
+        i.id_instructor,
+        u_ins.nombre || ' ' || u_ins.apellido AS instructor_nombre
+
       FROM solicitud_vuelo sv
       JOIN solicitud_semana ss ON ss.id_solicitud = sv.id_solicitud
       JOIN bloque_horario b ON b.id_bloque = sv.id_bloque
       JOIN aeronave ae ON ae.id_aeronave = sv.id_aeronave
+
       JOIN alumno al ON al.id_alumno = ss.id_alumno
-      JOIN usuario u ON u.id_usuario = al.id_usuario
+      JOIN usuario u_al ON u_al.id_usuario = al.id_usuario
+
+      JOIN instructor i ON i.id_instructor = al.id_instructor
+      JOIN usuario u_ins ON u_ins.id_usuario = i.id_usuario
+
       WHERE sv.id_semana = $1
-      ORDER BY b.hora_inicio, sv.dia_semana, ae.codigo
+      ORDER BY b.hora_inicio, sv.dia_semana, ae.modelo
       `,
       [idSemana]
     );
@@ -195,7 +287,6 @@ exports.getCalendario = async (req, res) => {
     res.status(500).json({ message: "Error obtener calendario" });
   }
 };
-
 
 exports.getBloquesHorario = async (req, res) => {
   try {
@@ -217,33 +308,44 @@ exports.getBloquesHorario = async (req, res) => {
 };
 
 exports.guardarCambios = async (req, res) => {
-  const { moves } = req.body;
-
-  if (!Array.isArray(moves) || moves.length === 0) {
-    return res.status(400).json({ message: "No hay movimientos" });
-  }
-
   const client = await db.connect();
 
   try {
+    const user = requireAdmin(req, res);
+    if (!user) return;
+
+    console.log("BODY RECIBIDO ADMIN:", req.body);
+
+    const { moves } = req.body;
+
+    if (!Array.isArray(moves) || moves.length === 0) {
+      return res.status(400).json({ message: "No hay movimientos" });
+    }
+
     await client.query("BEGIN");
 
     for (const m of moves) {
       await client.query(
         `
         UPDATE solicitud_vuelo
-        SET
-          dia_semana = $1,
-          id_bloque = $2,
-          id_aeronave = $3
+        SET dia_semana = 0,
+            id_bloque = NULL
+        WHERE id_detalle = $1
+        `,
+        [m.id_detalle]
+      );
+    }
+
+    for (const m of moves) {
+      await client.query(
+        `
+        UPDATE solicitud_vuelo
+        SET dia_semana = $1,
+            id_bloque = $2,
+            id_aeronave = $3
         WHERE id_detalle = $4
         `,
-        [
-          m.dia_semana,
-          m.id_bloque,
-          m.id_aeronave,
-          m.id_detalle,
-        ]
+        [m.dia_semana, m.id_bloque, m.id_aeronave, m.id_detalle]
       );
     }
 
@@ -252,8 +354,9 @@ exports.guardarCambios = async (req, res) => {
 
   } catch (e) {
     await client.query("ROLLBACK");
-    console.error("Error guardarCambios admin:", e);
+    console.error("guardarCambios ADMIN:", e);
     res.status(500).json({ message: "Error guardando cambios" });
+
   } finally {
     client.release();
   }
