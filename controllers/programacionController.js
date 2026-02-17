@@ -232,3 +232,18 @@ exports.guardarCambios = async (req, res) => {
     client.release();
   }
 };
+
+exports.getBloquesBloqueados = async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT id_bloque, dia_semana, motivo
+      FROM bloque_bloqueado_dia
+      ORDER BY dia_semana, id_bloque
+    `);
+
+    res.json(result.rows);
+  } catch (error) {
+    console.error("Error bloques bloqueados:", error);
+    res.status(500).json({ message: "Error obtener bloqueos" });
+  }
+};

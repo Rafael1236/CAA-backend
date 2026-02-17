@@ -68,6 +68,7 @@ exports.getMiHorario = async (req, res) => {
       `
       SELECT
         v.id_vuelo,
+        v.id_bloque,
         v.dia_semana,
         b.hora_inicio,
         b.hora_fin,
@@ -79,10 +80,10 @@ exports.getMiHorario = async (req, res) => {
       WHERE v.id_alumno = $1
         AND v.id_semana = $2
       ORDER BY b.hora_inicio, v.dia_semana
-
       `,
       [idAlumno, idSemana]
     );
+
 
     res.json(result.rows);
   } catch (error) {
@@ -124,7 +125,6 @@ exports.getMiLicencia = async (req, res) => {
     res.status(500).json({ message: "Error al obtener licencia" });
   }
 };
-
 
 exports.cancelarVuelo = async (req, res) => {
   const client = await db.connect();
@@ -208,5 +208,20 @@ exports.cancelarVuelo = async (req, res) => {
     return res.status(500).json({ message: "Error cancelando vuelo" });
   } finally {
     client.release();
+  }
+};
+
+exports.getBloquesBloqueados = async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT id_bloque, dia_semana, motivo
+      FROM bloque_bloqueado_dia
+      ORDER BY dia_semana, id_bloque
+    `);
+
+    res.json(result.rows);
+  } catch (error) {
+    console.error("Error bloques bloqueados:", error);
+    res.status(500).json({ message: "Error obtener bloqueos" });
   }
 };
