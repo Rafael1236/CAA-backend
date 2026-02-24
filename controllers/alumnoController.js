@@ -128,11 +128,24 @@ exports.getMiLicencia = async (req, res) => {
 
 exports.cancelarVuelo = async (req, res) => {
   const client = await db.connect();
+
   try {
     const user = requireAlumno(req, res);
     if (!user) return;
 
     const { id_vuelo } = req.params;
+
+    const alumnoRes = await client.query(
+      `SELECT id_alumno FROM alumno WHERE id_usuario = $1 AND activo = true`,
+      [user.id_usuario]
+    );
+
+    if (alumnoRes.rows.length === 0) {
+      client.release();
+      return res.status(404).json({ message: "Alumno no encontrado" });
+    }
+
+    const idAlumno = alumnoRes.rows[0].id_alumno;
 
     await client.query("BEGIN");
 
@@ -142,6 +155,7 @@ exports.cancelarVuelo = async (req, res) => {
         v.id_vuelo,
         v.estado,
         v.id_alumno,
+        v.id_semana,
         sv.fecha_inicio,
         v.dia_semana,
         bh.hora_inicio,
@@ -166,7 +180,7 @@ exports.cancelarVuelo = async (req, res) => {
 
     const vuelo = q.rows[0];
 
-    if (user.id_alumno && vuelo.id_alumno !== user.id_alumno) {
+    if (vuelo.id_alumno !== idAlumno) {
       await client.query("ROLLBACK");
       return res.status(403).json({ message: "No podés cancelar este vuelo" });
     }
@@ -177,31 +191,26 @@ exports.cancelarVuelo = async (req, res) => {
     }
 
     const timeCheck = await client.query(
-      `
-      SELECT (now() <= ($1::timestamp - interval '24 hour')) AS permitido
-      `,
+      `SELECT (now() <= ($1::timestamp - interval '24 hour')) AS permitido`,
       [vuelo.fecha_hora_vuelo]
     );
 
     if (!timeCheck.rows[0].permitido) {
       await client.query("ROLLBACK");
       return res.status(403).json({
-        message: "Solo podés cancelar con 1 hora de anticipación",
+        message: "Solo podés cancelar con más de 24 horas de anticipación",
         fecha_hora_vuelo: vuelo.fecha_hora_vuelo,
       });
     }
 
     await client.query(
-      `
-      UPDATE vuelo
-      SET estado = 'CANCELADO'
-      WHERE id_vuelo = $1
-      `,
+      `UPDATE vuelo SET estado = 'CANCELADO' WHERE id_vuelo = $1`,
       [id_vuelo]
     );
 
     await client.query("COMMIT");
     return res.json({ message: "Vuelo cancelado" });
+
   } catch (e) {
     await client.query("ROLLBACK");
     console.error("Error cancelarVuelo:", e);
