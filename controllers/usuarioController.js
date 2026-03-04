@@ -12,7 +12,8 @@ exports.getPerfil = async (req, res) => {
       apellido,
       correo,
       rol,
-      must_change_password
+      must_change_password,
+      must_set_email
     FROM usuario
     WHERE id_usuario = $1
   `, [user.id_usuario]);
@@ -56,7 +57,8 @@ exports.cambiarCorreo = async (req, res) => {
     await db.query(
       `
       UPDATE usuario
-      SET correo = $1
+      SET correo = $1,
+          must_set_email = false
       WHERE id_usuario = $2
       `,
       [nuevoCorreo.toLowerCase(), user.id_usuario]
