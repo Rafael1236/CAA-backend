@@ -55,8 +55,10 @@ exports.login = async (req, res) => {
     }
 
     let ok = false;
+
     if (user.password_hash && user.password_hash.startsWith("$2")) {
-      ok = await bcrypt.compare(password, user.password_hash);
+      const hash = user.password_hash.replace("$2y$", "$2b$");
+      ok = await bcrypt.compare(password, hash);
     } else {
       ok = user.password_hash === password;
     }
