@@ -13,13 +13,17 @@ const usuarioController = require("./routes/usuarioRoutes");
 
 
 const app = express();
-app.use(cors({
+const corsOptions = {
   origin: [
     "https://n8n-prueba-front.5hoafb.easypanel.host",
-    "http://localhost:5173"
+    "http://localhost:5173",
   ],
-  credentials: true
-}));
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "x-user"],
+};
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
 app.use(express.json());
 app.get("/api/health", async (req, res) => {
   try {
