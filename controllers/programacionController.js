@@ -258,7 +258,7 @@ exports.guardarCambios = async (req, res) => {
         `
         UPDATE solicitud_vuelo
         SET dia_semana = 0,
-            id_bloque = NULL
+            id_bloque = 1
         WHERE id_detalle = $1
         `,
         [m.id_detalle]
