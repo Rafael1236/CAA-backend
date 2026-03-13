@@ -10,6 +10,8 @@ const agendarRoutes = require("./routes/agendarRoutes");
 const programacionController = require("./routes/programacionRoutes");
 const adminController = require("./routes/adminRoutes");
 const usuarioController = require("./routes/usuarioRoutes");
+const outboxRoutes = require("./routes/outboxRoutes");
+const webhookRoutes = require("./routes/webhookRoutes");
 
 
 const app = express();
@@ -45,6 +47,8 @@ app.use("/api/agendar", agendarRoutes);
 app.use("/api/programacion", programacionController);
 app.use("/api/admin", adminController);
 app.use("/api/usuario", usuarioController);
+app.use("/api/outbox", outboxRoutes);
+app.use("/api/webhooks", webhookRoutes);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, "0.0.0.0", () =>

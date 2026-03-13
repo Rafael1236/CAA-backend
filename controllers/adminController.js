@@ -1,6 +1,7 @@
 const db = require("../config/db");
 const { logAuditoria } = require("../utils/auditoria");
 const { pushOutbox } = require("../utils/outbox");
+const { dispatchWebhook } = require("../utils/webhookDispatcher");
 
 async function getNextSemanaId(client) {
   const semanaRes = await client.query(`
@@ -64,7 +65,7 @@ exports.getSemanas = async (req, res) => {
 
 exports.publicarSemana = async (req, res) => {
   const user = requireAdmin(req, res);
-    if (!user) return;
+  if (!user) return;
 
   const client = await db.connect();
 
@@ -157,6 +158,78 @@ exports.publicarSemana = async (req, res) => {
       [id_semana]
     );
 
+    const vuelosRes = await client.query(
+      `
+      SELECT
+        v.id_vuelo,
+        v.id_semana,
+        v.dia_semana,
+        v.id_bloque,
+        bh.hora_inicio,
+        bh.hora_fin,
+        a.codigo AS aeronave_codigo,
+
+        ua.nombre AS alumno_nombre,
+        ua.apellido AS alumno_apellido,
+
+        ui.nombre AS instructor_nombre,
+        ui.apellido AS instructor_apellido
+
+      FROM vuelo v
+      JOIN bloque_horario bh ON bh.id_bloque = v.id_bloque
+      JOIN aeronave a ON a.id_aeronave = v.id_aeronave
+
+      JOIN alumno al ON al.id_alumno = v.id_alumno
+      JOIN usuario ua ON ua.id_usuario = al.id_usuario
+
+      JOIN instructor i ON i.id_instructor = v.id_instructor
+      JOIN usuario ui ON ui.id_usuario = i.id_usuario
+
+      WHERE v.id_semana = $1
+      ORDER BY v.dia_semana, bh.hora_inicio, a.codigo
+      `,
+      [id_semana]
+    );
+
+    const vuelos = vuelosRes.rows.map((row) => ({
+      id_vuelo: row.id_vuelo,
+      id_semana: row.id_semana,
+      dia_semana: row.dia_semana,
+      dia_nombre:
+        row.dia_semana === 1
+          ? "LUNES"
+          : row.dia_semana === 2
+          ? "MARTES"
+          : row.dia_semana === 3
+          ? "MIERCOLES"
+          : row.dia_semana === 4
+          ? "JUEVES"
+          : row.dia_semana === 5
+          ? "VIERNES"
+          : row.dia_semana === 6
+          ? "SABADO"
+          : "N/A",
+      id_bloque: row.id_bloque,
+      hora_inicio: row.hora_inicio,
+      hora_fin: row.hora_fin,
+      bloque: `${row.hora_inicio} - ${row.hora_fin}`,
+      aeronave: row.aeronave_codigo,
+      alumno: `${row.alumno_nombre} ${row.alumno_apellido}`,
+      instructor: `${row.instructor_nombre} ${row.instructor_apellido}`,
+    }));
+
+    const payloadSemanaPublicada = {
+      id_semana,
+      fecha_inicio,
+      fecha_fin,
+      publicado_por: {
+        id_usuario: user.id_usuario,
+        rol: user.rol,
+      },
+      total_vuelos: vuelos.length,
+      vuelos,
+    };
+
     await logAuditoria(client, {
       accion: "PUBLICAR_SEMANA",
       entidad: "semana_vuelo",
@@ -165,17 +238,16 @@ exports.publicarSemana = async (req, res) => {
       actor: user,
       req,
       descripcion: `Semana publicada: ${id_semana}`,
-      metadata: { fecha_inicio, fecha_fin }
+      metadata: {
+        fecha_inicio,
+        fecha_fin,
+        total_vuelos: vuelos.length,
+      },
     });
 
     await pushOutbox(client, {
       tipo: "SEMANA_PUBLICADA",
-      payload: {
-        id_semana,
-        fecha_inicio,
-        fecha_fin,
-        publicado_por: { id_usuario: user.id_usuario, rol: user.rol }
-      }
+      payload: payloadSemanaPublicada,
     });
 
     const nuevaFechaInicio = new Date(fecha_inicio);
@@ -204,7 +276,13 @@ exports.publicarSemana = async (req, res) => {
     }
 
     await client.query("COMMIT");
-    res.json({ message: "Semana publicada y vuelos generados correctamente" });
+
+    await dispatchWebhook("SEMANA_PUBLICADA", payloadSemanaPublicada);
+
+    res.json({
+      message: "Semana publicada y vuelos generados correctamente",
+      total_vuelos: vuelos.length,
+    });
   } catch (e) {
     await client.query("ROLLBACK");
     console.error("Error publicarSemana:", e);
@@ -363,26 +441,170 @@ exports.guardarCambios = async (req, res) => {
     const user = requireAdmin(req, res);
     if (!user) return;
 
-    console.log("BODY RECIBIDO ADMIN:", req.body);
-
     const { moves } = req.body;
 
     if (!Array.isArray(moves) || moves.length === 0) {
       return res.status(400).json({ message: "No hay movimientos" });
     }
 
+    const semanaRes = await client.query(
+      `
+      SELECT w.id_semana, w.publicada
+      FROM solicitud_vuelo sv
+      JOIN semana_vuelo w ON w.id_semana = sv.id_semana
+      WHERE sv.id_detalle = $1
+      `,
+      [moves[0].id_detalle]
+    );
+
+    if (semanaRes.rows.length === 0) {
+      return res.status(404).json({ message: "Semana no encontrada" });
+    }
+
+    const { id_semana, publicada } = semanaRes.rows[0];
+
     await client.query("BEGIN");
 
+    const idsMovidos = moves.map((m) => m.id_detalle);
+
+    const infoMovidosRes = await client.query(
+      `
+      SELECT
+        sv.id_detalle,
+        ss.id_alumno,
+        al.id_instructor
+      FROM solicitud_vuelo sv
+      JOIN solicitud_semana ss ON ss.id_solicitud = sv.id_solicitud
+      JOIN alumno al ON al.id_alumno = ss.id_alumno
+      WHERE sv.id_detalle = ANY($1::int[])
+      `,
+      [idsMovidos]
+    );
+
+    const infoPorDetalle = new Map(
+      infoMovidosRes.rows.map((r) => [Number(r.id_detalle), r])
+    );
+
+    const destinosBloqueAeronave = new Set();
+    const destinosAlumno = new Set();
+    const destinosInstructor = new Set();
+
     for (const m of moves) {
+      const info = infoPorDetalle.get(Number(m.id_detalle));
+      if (!info) {
+        throw new Error(`No se encontró información del detalle ${m.id_detalle}`);
+      }
+
+      const keyBloqueAeronave = `${m.dia_semana}-${m.id_bloque}-${m.id_aeronave}`;
+      if (destinosBloqueAeronave.has(keyBloqueAeronave)) {
+        throw Object.assign(
+          new Error("Dos vuelos no pueden quedar en el mismo bloque y aeronave"),
+          { code: "23505" }
+        );
+      }
+      destinosBloqueAeronave.add(keyBloqueAeronave);
+
+      const keyAlumno = `${info.id_alumno}-${m.dia_semana}-${m.id_bloque}`;
+      if (destinosAlumno.has(keyAlumno)) {
+        throw Object.assign(
+          new Error("Un alumno no puede tener dos vuelos en el mismo horario"),
+          { code: "23506" }
+        );
+      }
+      destinosAlumno.add(keyAlumno);
+
+      const keyInstructor = `${info.id_instructor}-${m.dia_semana}-${m.id_bloque}`;
+      if (destinosInstructor.has(keyInstructor)) {
+        throw Object.assign(
+          new Error("Un instructor no puede tener dos vuelos en el mismo horario"),
+          { code: "23507" }
+        );
+      }
+      destinosInstructor.add(keyInstructor);
+    }
+
+    for (let idx = 0; idx < moves.length; idx++) {
+      const m = moves[idx];
+
       await client.query(
         `
         UPDATE solicitud_vuelo
         SET dia_semana = 0,
-            id_bloque = 1
-        WHERE id_detalle = $1
+            id_bloque = $1
+        WHERE id_detalle = $2
         `,
-        [m.id_detalle]
+        [idx + 1, m.id_detalle]
       );
+    }
+
+    for (const m of moves) {
+      const info = infoPorDetalle.get(Number(m.id_detalle));
+
+      const ocupadoBloqueAeronave = await client.query(
+        `
+        SELECT 1
+        FROM solicitud_vuelo
+        WHERE id_semana = $1
+          AND dia_semana = $2
+          AND id_bloque = $3
+          AND id_aeronave = $4
+          AND id_detalle <> ALL($5::int[])
+        LIMIT 1
+        `,
+        [id_semana, m.dia_semana, m.id_bloque, m.id_aeronave, idsMovidos]
+      );
+
+      if (ocupadoBloqueAeronave.rows.length > 0) {
+        throw Object.assign(
+          new Error("Ese bloque y aeronave ya está ocupado"),
+          { code: "23505" }
+        );
+      }
+
+      const ocupadoAlumno = await client.query(
+        `
+        SELECT 1
+        FROM solicitud_vuelo sv
+        JOIN solicitud_semana ss ON ss.id_solicitud = sv.id_solicitud
+        WHERE sv.id_semana = $1
+          AND ss.id_alumno = $2
+          AND sv.dia_semana = $3
+          AND sv.id_bloque = $4
+          AND sv.id_detalle <> ALL($5::int[])
+        LIMIT 1
+        `,
+        [id_semana, info.id_alumno, m.dia_semana, m.id_bloque, idsMovidos]
+      );
+
+      if (ocupadoAlumno.rows.length > 0) {
+        throw Object.assign(
+          new Error("El alumno ya tiene un vuelo en ese horario"),
+          { code: "23506" }
+        );
+      }
+
+      const ocupadoInstructor = await client.query(
+        `
+        SELECT 1
+        FROM solicitud_vuelo sv
+        JOIN solicitud_semana ss ON ss.id_solicitud = sv.id_solicitud
+        JOIN alumno al ON al.id_alumno = ss.id_alumno
+        WHERE sv.id_semana = $1
+          AND al.id_instructor = $2
+          AND sv.dia_semana = $3
+          AND sv.id_bloque = $4
+          AND sv.id_detalle <> ALL($5::int[])
+        LIMIT 1
+        `,
+        [id_semana, info.id_instructor, m.dia_semana, m.id_bloque, idsMovidos]
+      );
+
+      if (ocupadoInstructor.rows.length > 0) {
+        throw Object.assign(
+          new Error("El instructor ya tiene un vuelo en ese horario"),
+          { code: "23507" }
+        );
+      }
     }
 
     for (const m of moves) {
@@ -415,26 +637,69 @@ exports.guardarCambios = async (req, res) => {
       accion: "GUARDAR_CAMBIOS",
       entidad: "calendario",
       id_entidad: null,
+      id_semana,
       actor: user,
       req,
       descripcion: `Admin guardó ${moves.length} movimientos`,
-      metadata: { moves }
-    });
-
-    await pushOutbox(client, {
-      tipo: "VUELO_REPROGRAMADO",
-      payload: {
+      metadata: {
         moves,
-        hecho_por: { id_usuario: user.id_usuario, rol: user.rol }
+        semana_publicada: publicada
       }
     });
 
-
+    if (publicada) {
+      await pushOutbox(client, {
+        tipo: "VUELO_REPROGRAMADO",
+        payload: {
+          id_semana,
+          moves,
+          hecho_por: {
+            id_usuario: user.id_usuario,
+            rol: user.rol
+          }
+        }
+      });
+    }
 
     await client.query("COMMIT");
-    res.json({ message: "Cambios guardados correctamente" });
+
+    if (publicada) {
+      await dispatchWebhook("VUELO_REPROGRAMADO", {
+        id_semana,
+        moves,
+        hecho_por: {
+          id_usuario: user.id_usuario,
+          rol: user.rol
+        }
+      });
+    }
+
+    res.json({
+      message: publicada
+        ? "Cambios guardados correctamente"
+        : "Cambios guardados correctamente (sin notificación porque la semana aún no está publicada)"
+    });
   } catch (e) {
     await client.query("ROLLBACK");
+
+    if (e.code === "23505") {
+      return res.status(409).json({
+        message: "Conflicto: ese bloque y aeronave ya están ocupados"
+      });
+    }
+
+    if (e.code === "23506") {
+      return res.status(409).json({
+        message: "Conflicto: el alumno ya tiene un vuelo en ese horario"
+      });
+    }
+
+    if (e.code === "23507") {
+      return res.status(409).json({
+        message: "Conflicto: el instructor ya tiene un vuelo en ese horario"
+      });
+    }
+
     console.error("guardarCambios ADMIN:", e);
     res.status(500).json({ message: "Error guardando cambios" });
   } finally {
@@ -540,9 +805,10 @@ exports.cancelarVueloAdmin = async (req, res) => {
       }
     }
 
-    await client.query(`UPDATE vuelo SET estado = 'CANCELADO' WHERE id_vuelo = $1`, [
-      id_vuelo,
-    ]);
+    await client.query(
+      `UPDATE vuelo SET estado = 'CANCELADO' WHERE id_vuelo = $1`,
+      [id_vuelo]
+    );
 
     await logAuditoria(client, {
       accion: "CANCELAR_VUELO",
@@ -564,28 +830,44 @@ exports.cancelarVueloAdmin = async (req, res) => {
       },
     });
 
+    await pushOutbox(client, {
+      tipo: "VUELO_CANCELADO",
+      payload: {
+        id_vuelo: vuelo.id_vuelo,
+        id_semana: vuelo.id_semana,
+        id_alumno: vuelo.id_alumno,
+        id_instructor: vuelo.id_instructor,
+        id_aeronave: vuelo.id_aeronave,
+        dia_semana: vuelo.dia_semana,
+        id_bloque: vuelo.id_bloque,
+        fecha_hora_vuelo: vuelo.fecha_hora_vuelo,
+        motivo: motivo ?? null,
+        cancelado_por: {
+          id_usuario: user.id_usuario,
+          rol: user.rol
+        },
+        destino_notificacion: "ALUMNO",
+      },
+    });
+
     await client.query("COMMIT");
 
-    try {
-      await pushOutbox(client, {
-        tipo: "VUELO_CANCELADO",
-        payload: {
-          id_vuelo: vuelo.id_vuelo,
-          id_semana: vuelo.id_semana,
-          id_alumno: vuelo.id_alumno,
-          id_instructor: vuelo.id_instructor,
-          id_aeronave: vuelo.id_aeronave,
-          dia_semana: vuelo.dia_semana,
-          id_bloque: vuelo.id_bloque,
-          fecha_hora_vuelo: vuelo.fecha_hora_vuelo,
-          motivo: motivo ?? null,
-          cancelado_por: { id_usuario: user.id_usuario, rol: user.rol },
-          destino_notificacion: "ALUMNO",
-        },
-      });
-    } catch (err) {
-      console.error("Outbox falló (no se revierte cancelación):", err);
-    }
+    await dispatchWebhook("VUELO_CANCELADO", {
+      id_vuelo: vuelo.id_vuelo,
+      id_semana: vuelo.id_semana,
+      id_alumno: vuelo.id_alumno,
+      id_instructor: vuelo.id_instructor,
+      id_aeronave: vuelo.id_aeronave,
+      dia_semana: vuelo.dia_semana,
+      id_bloque: vuelo.id_bloque,
+      fecha_hora_vuelo: vuelo.fecha_hora_vuelo,
+      motivo: motivo ?? null,
+      cancelado_por: {
+        id_usuario: user.id_usuario,
+        rol: user.rol
+      },
+      destino_notificacion: "ALUMNO",
+    });
 
     return res.json({ message: "Vuelo cancelado" });
   } catch (e) {
